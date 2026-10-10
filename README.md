@@ -14,7 +14,6 @@ The application is kept very simple on purpose. The focus is on the infrastructu
 + Terraform 1.10 or newer - To provision the AWS resources.
 + AWS CLI - To authenticate to AWS.
 + A Kubernetes cluster with the NGINX ingress controller installed and a CNI that enforces NetworkPolicy (for example Calico or Cilium).
-+ kind 0.24 or newer - Only needed to run the Helm chart on a local cluster.
 + Helm 3.8 or newer - To install the app chart and Argo CD.
 
 ## Project Structure
@@ -35,22 +34,21 @@ The application is kept very simple on purpose. The focus is on the infrastructu
 
 ## Running The Application Locally
 
-There are three ways to run the service on a laptop. Each one builds on the one before it, and we can stop after any of them:
+There are two ways to run the service on a laptop. The second builds on the first:
 
 1. With Go - The quickest way to see the API working.
 2. With Docker - Runs the same image the CI pipeline builds.
-3. On a local Kubernetes cluster (kind) - Installs the real Helm chart from `charts/items-api`.
 
 All commands are run from the root of the repository unless stated otherwise. On macOS, the tools can be installed with Homebrew:
 
 ```bash
-brew install go kind kubectl
+brew install go kubectl helm
 brew install --cask docker   #then open Docker Desktop from Applications
 
 #confirm everything is installed
 go version
 docker version
-kind version
+helm version
 kubectl version --client
 ```
 
@@ -163,80 +161,14 @@ Docker Desktop must be running for this option.
 
 6. Lastly, we stop the container with `Ctrl+C` or `docker stop items-api`.
 
-### Option 3: Run On A Local Kubernetes Cluster (kind)
-
-Here we install the same Helm chart that Argo CD deploys to EKS, on a cluster that runs inside Docker. The default network plugin in kind 0.24 and newer enforces NetworkPolicy, so the chart's network policies are active.
-
-1. First, we create the cluster:
-
-    ```bash
-    kind create cluster --name items-api
-    kubectl get nodes
-    ```
-
-2. kind cannot see the images in our local Docker, so we load the image built in Option 2 into the cluster:
-
-    ```bash
-    kind load docker-image items-api:dev --name items-api
-    ```
-
-3. Next, we create the namespace with the `restricted` Pod Security Standard (on EKS, Argo CD adds these labels), then install the chart with the local image. `secret.create=true` makes the chart create the token Secret, which is only done on a local cluster.
-
-    ```bash
-    kubectl create namespace items-api
-    kubectl label namespace items-api \
-      pod-security.kubernetes.io/enforce=restricted \
-      pod-security.kubernetes.io/warn=restricted
-
-    helm install items-api charts/items-api -n items-api \
-      --set image.repository=items-api --set image.tag=dev \
-      --set secret.create=true --set secret.apiToken=local-token
-    ```
-
-4. We wait for the rollout and check what was created. Both pods should be `Running` and `1/1`. There is no Ingress, because it is turned off by default (`ingress.enabled`) and this cluster has no NGINX ingress controller.
-
-    ```bash
-    kubectl -n items-api rollout status deployment/items-api
-    kubectl -n items-api get pods,svc,networkpolicy,configmap,secret,pdb
-    ```
-
-5. Now we call the API through the Service with a port-forward:
-
-    ```bash
-    kubectl -n items-api port-forward svc/items-api 8080:80
-    ```
-
-    In a second terminal (the token is the `local-token` we set in step 3):
-
-    ```bash
-    curl -s localhost:8080/healthz
-    curl -s -X POST localhost:8080/api/v1/items \
-      -H 'Authorization: Bearer local-token' -d '{"name":"stethoscope"}'
-    curl -s localhost:8080/api/v1/items
-    ```
-
-6. To confirm the NetworkPolicy works, we start a temporary pod in the same namespace and try to reach the API. Only the ingress-nginx pods are allowed in, so the request should time out. The long `--overrides` flag is there because the namespace enforces the `restricted` Pod Security Standard and rejects pods without these settings.
-
-    ```bash
-    kubectl -n items-api run np-test --rm -it --restart=Never --image=curlimages/curl:8.10.1 \
-      --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"np-test","image":"curlimages/curl:8.10.1","args":["-s","-m","5","http://items-api/healthz"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
-    ```
-
-7. Lastly, we delete the cluster:
-
-    ```bash
-    kind delete cluster --name items-api
-    ```
-
 **Troubleshooting**
 
 | Problem | Fix |
 |---|---|
 | `address already in use` on port 8080 | Something else is using the port. Use another one, for example `PORT=9090 go run .` or `-p 9090:8080`. |
 | `Cannot connect to the Docker daemon` | Docker Desktop is not running. Open it and wait for it to start. |
-| Pods stuck in `ImagePullBackOff` | The image was not loaded into kind. Run step 2 again and confirm the image with `kubectl -n items-api get deploy items-api -o jsonpath='{..image}'`, which should print `items-api:dev`. |
-| POST returns `401` | Send the header `Authorization: Bearer <API_TOKEN>`. On kind the token is `local-token`. |
-| Pods stuck in `CreateContainerConfigError` | The `items-api-secrets` Secret is missing. On kind, install with `secret.create=true`. On EKS, create it by hand as shown in step 4. |
+| POST returns `401` | Send the header `Authorization: Bearer <API_TOKEN>`. On EKS, read the token with `kubectl -n items-api get secret items-api-secrets -o jsonpath='{.data.API_TOKEN}' \| base64 -d`. |
+| Pods stuck in `CreateContainerConfigError` | The `items-api-secrets` Secret is missing. Create it by hand as shown in step 4 of section 4. |
 
 ## Procedures
 
@@ -392,6 +324,54 @@ gitops/
     curl localhost:8080/healthz
     ```
 
+**What it looks like running on EKS**
+
+These were taken on the live cluster before it was torn down.
+
+1. Two worker nodes, both `Ready`, in the private subnets with no external IP:
+
+    ```bash
+    kubectl get nodes -o wide
+    ```
+
+    ![EKS nodes](./images/eks-nodes.png)
+
+2. Argo CD with the `root` and `items-api` applications, both `Synced` and `Healthy`:
+
+    ![Argo CD applications](./images/argocd-apps.png)
+
+3. What Argo CD deployed into the `items-api` namespace:
+
+    ```bash
+    kubectl -n items-api get pods,svc,networkpolicy,pdb
+    ```
+
+    ![Resources on EKS](./images/eks-resources.png)
+
+4. The API through a port-forward. `/healthz` reports the image tag Argo CD deployed, a write without the token returns `401`, and with the token returns `201`:
+
+    ```bash
+    kubectl -n items-api port-forward svc/items-api 8080:80
+
+    #in a second terminal
+    TOKEN=$(kubectl -n items-api get secret items-api-secrets -o jsonpath='{.data.API_TOKEN}' | base64 -d)
+    curl -s localhost:8080/healthz
+    curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/v1/items -d '{"name":"x"}'
+    curl -s -X POST localhost:8080/api/v1/items -H "Authorization: Bearer $TOKEN" -d '{"name":"stethoscope"}'
+    curl -s localhost:8080/api/v1/items
+    ```
+
+    ![curl against the app on EKS](./images/eks-curl.png)
+
+5. The NetworkPolicy, enforced by the VPC CNI. Only the ingress controller may reach the app, so a temporary pod in the same namespace times out and curl prints `000`. The long `--overrides` flag is there because the namespace enforces the `restricted` Pod Security Standard and rejects pods without these settings.
+
+    ```bash
+    kubectl -n items-api run np-test --rm -i --restart=Never --image=curlimages/curl:8.10.1 \
+      --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"np-test","image":"curlimages/curl:8.10.1","args":["-s","-m","5","-o","/dev/null","-w","%{http_code}","http://items-api/healthz"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
+    ```
+
+    ![NetworkPolicy on EKS](./images/eks-networkpolicy.png)
+
 **How to deploy a new version**
 
 After every merge to `main`, once the image has passed the scan and been pushed, CI opens a pull request called "Deploy items-api <tag>" that changes `image.tag` in [gitops/apps/items-api.yaml](./gitops/apps/items-api.yaml). We review and merge it, and Argo CD rolls out the new pods within about three minutes. To roll back, we revert that commit.
@@ -400,6 +380,18 @@ After every merge to `main`, once the image has passed the scan and been pushed,
 + There is only ever one deploy pull request. CI reuses the `deploy/items-api` branch, so a newer image updates the open pull request instead of opening a second one.
 + A push that only changes `gitops/` does not run CI. Otherwise merging a deploy pull request would build a new image and open another deploy pull request, forever.
 + Manual `kubectl` changes are undone automatically (`selfHeal`), so the cluster cannot drift from git.
+
+The CI run on `main`, with the deploy pull request opened as its last job:
+
+![CI run with the deploy job](./images/ci-run.png)
+
+The deploy pull request it opened, changing only the image tag:
+
+![Deploy pull request](./images/deploy-pr.png)
+
+A Terraform run on `main`. Plan only runs for pull requests, so it is skipped here. Apply ran in the `production` environment after it was approved, and printed the outputs:
+
+![Terraform apply on main](./images/terraform-apply.png)
 
 For CI to open pull requests, "Allow GitHub Actions to create and approve pull requests" must be turned on under Settings > Actions > General > Workflow permissions.
 
@@ -573,9 +565,8 @@ So my approach is to make sure the plan shows no changes before I apply anything
 ## Assumptions
 
 + AWS is the cloud provider, with one account and one region (`eu-west-1`, Ireland, the closest to Nigeria).
-+ The Kubernetes cluster already exists (for example EKS) and its nodes can pull images from ECR. Creating the cluster is not part of this task.
-+ The NGINX ingress controller is installed in the `ingress-nginx` namespace.
-+ DNS and the TLS certificate for the ingress hostname are handled by the platform (I assumed cert-manager).
++ The EKS cluster is created by Terraform in this repository (`terraform/modules/eks`). It is a demo cluster: it ran long enough to verify the setup and was then torn down to save cost.
++ No ingress controller is installed, so the chart's Ingress is turned off and the app is reached through a port-forward. When it is turned on, it assumes the NGINX ingress controller in the `ingress-nginx` namespace, with DNS and TLS handled by the platform (I assumed cert-manager).
 + The `bootstrap` folder is applied by an engineer with the right permissions. Everything else is applied by GitHub Actions. The image push role cannot create or change infrastructure.
 
 ## Trade-offs And Shortcuts
