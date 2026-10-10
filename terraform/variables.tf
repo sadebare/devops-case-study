@@ -23,6 +23,12 @@ variable "github_repository" {
   type        = string
 }
 
+variable "github_oidc_subject_prefix" {
+  description = "Start of the GitHub OIDC \"sub\" claim. Null means \"repo:<github_repository>\". Repositories with GitHub's immutable subject format need \"repo:<owner>@<owner id>/<name>@<repo id>\"."
+  type        = string
+  default     = null
+}
+
 variable "ci_allowed_refs" {
   description = "Git refs whose CI runs may push images."
   type        = list(string)

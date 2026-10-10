@@ -27,6 +27,17 @@ variable "github_repository" {
   }
 }
 
+variable "github_oidc_subject_prefix" {
+  description = "Start of the GitHub OIDC \"sub\" claim. Null means \"repo:<github_repository>\". Repositories with GitHub's immutable subject format need \"repo:<owner>@<owner id>/<name>@<repo id>\"."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.github_oidc_subject_prefix == null || can(regex("^repo:[^*]+$", var.github_oidc_subject_prefix))
+    error_message = "github_oidc_subject_prefix must start with \"repo:\" and contain no wildcards."
+  }
+}
+
 variable "apply_environment" {
   description = "GitHub environment the terraform apply job runs in. Only that environment can assume the apply role."
   type        = string

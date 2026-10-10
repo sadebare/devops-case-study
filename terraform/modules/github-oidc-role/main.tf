@@ -1,5 +1,6 @@
 locals {
   github_oidc_host = "token.actions.githubusercontent.com"
+  subject_prefix   = coalesce(var.subject_prefix, "repo:${var.github_repository}")
   oidc_provider_arn = (
     var.create_oidc_provider
     ? aws_iam_openid_connect_provider.github[0].arn
@@ -48,7 +49,7 @@ data "aws_iam_policy_document" "assume" {
     condition {
       test     = "StringEquals"
       variable = "${local.github_oidc_host}:sub"
-      values   = [for ref in var.allowed_refs : "repo:${var.github_repository}:ref:${ref}"]
+      values   = [for ref in var.allowed_refs : "${local.subject_prefix}:ref:${ref}"]
     }
   }
 }

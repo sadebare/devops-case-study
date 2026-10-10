@@ -11,6 +11,7 @@ module "ci_role" {
 
   role_name            = "${var.service_name}-github-actions"
   github_repository    = var.github_repository
+  subject_prefix       = var.github_oidc_subject_prefix
   allowed_refs         = var.ci_allowed_refs
   ecr_repository_arns  = [module.ecr.repository_arn]
   create_oidc_provider = var.create_github_oidc_provider

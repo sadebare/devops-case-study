@@ -37,6 +37,9 @@ env:
   # Values that terraform.tfvars holds locally.
   TF_VAR_aws_region: ${{ vars.AWS_REGION || 'eu-west-1' }}
   TF_VAR_github_repository: ${{ github.repository }}
+  # This repository uses GitHub's immutable OIDC subject format, which carries
+  # the owner and repository IDs so the trust survives a rename.
+  TF_VAR_github_oidc_subject_prefix: repo:${{ github.repository_owner }}@${{ github.repository_owner_id }}/${{ github.event.repository.name }}@${{ github.repository_id }}
 
 # Third-party actions are pinned to a full commit SHA, with the release in a
 # trailing comment. A tag can be moved to different code; a SHA cannot.

@@ -21,9 +21,10 @@ locals {
   # Pull request runs get the read-only plan role. Only jobs running in the
   # protected environment get the apply role, so a pull request cannot apply
   # even if someone edits the workflow in their branch.
+  subject_prefix = coalesce(var.github_oidc_subject_prefix, "repo:${var.github_repository}")
   terraform_role_subjects = {
-    plan  = "repo:${var.github_repository}:pull_request"
-    apply = "repo:${var.github_repository}:environment:${var.apply_environment}"
+    plan  = "${local.subject_prefix}:pull_request"
+    apply = "${local.subject_prefix}:environment:${var.apply_environment}"
   }
 }
 

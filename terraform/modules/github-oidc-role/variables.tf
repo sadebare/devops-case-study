@@ -13,6 +13,17 @@ variable "github_repository" {
   }
 }
 
+variable "subject_prefix" {
+  description = "Start of the OIDC \"sub\" claim, before \":ref:...\". Null means \"repo:<github_repository>\". Set it when the repository uses GitHub's immutable subject format, \"repo:<owner>@<owner id>/<name>@<repo id>\"."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.subject_prefix == null || can(regex("^repo:[^*]+$", var.subject_prefix))
+    error_message = "subject_prefix must start with \"repo:\" and contain no wildcards."
+  }
+}
+
 variable "allowed_refs" {
   description = "Git refs whose workflow runs may assume the role. Pull request runs have a different subject and are therefore excluded."
   type        = list(string)
