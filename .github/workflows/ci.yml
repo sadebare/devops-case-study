@@ -2,11 +2,19 @@ name: ci
 
 # Pull requests: lint, test, build and scan. Nothing is pushed.
 # Merges to main: the same, then push the scanned image to ECR.
+#
+# A change that only touches gitops/ is a deploy, not new code, so it does not
+# build. Without this, merging a deploy pull request would build a new image,
+# which would open another deploy pull request, forever.
 on:
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "gitops/**"
   push:
     branches: [main]
+    paths-ignore:
+      - "gitops/**"
 
 # A newer commit on the same PR supersedes the older run. Runs on main are
 # never cancelled, so every merge produces an image.
@@ -79,6 +87,8 @@ jobs:
       contents: read
       id-token: write # exchange the GitHub OIDC token for short-lived AWS credentials
       security-events: write # upload Trivy results to the Security tab
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -172,3 +182,58 @@ jobs:
             echo "- Tag: \`$REMOTE\`"
             echo "- Digest: \`$digest\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # GitOps hand-off. The pipeline never touches the cluster: it proposes the
+  # new image tag in git, and Argo CD deploys it once the pull request is
+  # merged. One branch is reused, so there is only ever one open deploy pull
+  # request, always for the latest image.
+  deploy-pr:
+    name: Open deploy pull request
+    needs: image
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # push the deploy branch
+      pull-requests: write # open or update the pull request
+    steps:
+      # Credentials are kept here (unlike the other jobs) because this job
+      # pushes a branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Update image tag and open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.image.outputs.tag }}
+          FILE: gitops/apps/items-api.yaml
+          BRANCH: deploy/items-api
+        run: |
+          set -euo pipefail
+
+          # The file has exactly one image tag line.
+          sed -i -E "s/^( +tag: \")[^\"]*(\")/\1${TAG}\2/" "$FILE"
+          grep -q "tag: \"${TAG}\"" "$FILE"
+
+          if git diff --quiet; then
+            echo "items-api ${TAG} is already the deployed tag."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -am "Deploy items-api ${TAG}"
+          git push --force origin "$BRANCH"
+
+          title="Deploy items-api ${TAG}"
+          body=$(printf '%s\n' \
+            "Sets the items-api image to \`${TAG}\`, built from ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}." \
+            "" \
+            "The image passed the tests and the Trivy scan, and is already in ECR. Merging this deploys it: Argo CD syncs within about three minutes. Reverting it rolls back.")
+
+          if [ "$(gh pr view "$BRANCH" --json state -q .state 2>/dev/null || true)" = "OPEN" ]; then
+            gh pr edit "$BRANCH" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"
+          fi
+          echo "### Deploy pull request: ${title}" >> "$GITHUB_STEP_SUMMARY"

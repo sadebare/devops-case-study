@@ -317,6 +317,7 @@ git push -u origin my-change
 2. Build the Docker image and tag it with the git commit SHA.
 3. Scan the image with Trivy. The pipeline fails if there is a HIGH or CRITICAL vulnerability that has a fix available. The full result is also uploaded to the Security tab of the repository.
 4. Push the image to ECR. This step only runs on a merge to `main`.
+5. Open a deploy pull request that sets the new image tag in `gitops/apps/items-api.yaml`. Merging it is the deploy. This step only runs on a merge to `main`.
 
 Terraform has its own workflow, [.github/workflows/terraform.yml](./.github/workflows/terraform.yml), which only runs when something under `terraform/` changes. It is explained in step 5.
 
@@ -393,7 +394,14 @@ gitops/
 
 **How to deploy a new version**
 
-CI prints the image tag at the end of each run on `main`. We change `image.tag` in [gitops/apps/items-api.yaml](./gitops/apps/items-api.yaml) to that tag and merge. Argo CD picks up the change within about three minutes and rolls out the new pods. Manual `kubectl` changes are undone automatically (`selfHeal`), so the cluster cannot drift from git.
+After every merge to `main`, once the image has passed the scan and been pushed, CI opens a pull request called "Deploy items-api <tag>" that changes `image.tag` in [gitops/apps/items-api.yaml](./gitops/apps/items-api.yaml). We review and merge it, and Argo CD rolls out the new pods within about three minutes. To roll back, we revert that commit.
+
++ The pipeline never gets access to the cluster. It only proposes a change in git, and Argo CD pulls it.
++ There is only ever one deploy pull request. CI reuses the `deploy/items-api` branch, so a newer image updates the open pull request instead of opening a second one.
++ A push that only changes `gitops/` does not run CI. Otherwise merging a deploy pull request would build a new image and open another deploy pull request, forever.
++ Manual `kubectl` changes are undone automatically (`selfHeal`), so the cluster cannot drift from git.
+
+For CI to open pull requests, "Allow GitHub Actions to create and approve pull requests" must be turned on under Settings > Actions > General > Workflow permissions.
 
 The `items-api` Application runs in its own AppProject, which can only deploy this repository into the `items-api` namespace, instead of the default project that can deploy anything anywhere.
 
@@ -575,7 +583,7 @@ So my approach is to make sure the plan shows no changes before I apply anything
 + There is one NAT gateway instead of one per availability zone. If its zone goes down, the nodes in the other zone lose internet access until it recovers.
 + The EKS API endpoint is public, so `kubectl` works from a laptop. It is open to any IP by default, and `eks_public_access_cidrs` narrows it.
 + The VPC CNI uses the node role instead of its own Pod Identity role. With one app on the cluster this is simpler, and it is the first thing to change as more apps arrive.
-+ The pipeline has no access to the cluster. It pushes the image, and Argo CD pulls the change from git. Bumping the image tag in git is still a manual commit for now.
++ The pipeline has no access to the cluster. It pushes the image and opens a deploy pull request, and Argo CD pulls the change from git once it is merged. Deploys are not fully automatic on purpose: a person merges each one.
 + Argo CD itself is installed once with `helm` and is not yet managed by Argo CD. It runs one replica of each component with no SSO, and the UI is only reachable through a port-forward.
 + There is only one environment. There is no separate dev, staging and production.
 + I did not set a CPU limit on the container, only a CPU request and a memory limit. A CPU limit can slow the app down even when the node has free CPU. If the platform requires one, it is a one line change in the deployment.
@@ -589,7 +597,6 @@ So my approach is to make sure the plan shows no changes before I apply anything
 
 ## What I Would Do Next
 
-+ Automatic image bumps - After pushing an image, CI opens a pull request that updates `image.tag` in `gitops/apps/items-api.yaml`, so a deploy is just a review and a merge.
 + Argo CD manages itself - Add an Application for the Argo CD chart to `gitops/apps/`, so upgrading Argo CD is also a pull request.
 + External Secrets Operator - Sync the API token from AWS Secrets Manager instead of creating the Secret by hand.
 + Restrict image registries - An admission policy (Kyverno) that only lets pods use images from our ECR. The node role already limits ECR pulls to our repository, but it cannot stop a pod from pulling from Docker Hub.
