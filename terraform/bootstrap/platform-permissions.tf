@@ -148,6 +148,38 @@ data "aws_iam_policy_document" "platform_write" {
     }
   }
 
+  # Creating a node group from a launch template makes EKS check that the
+  # caller could launch instances with it. Instances may only be launched
+  # through a launch template, in this region.
+  statement {
+    sid       = "Ec2RunInstancesFromLaunchTemplate"
+    effect    = "Allow"
+    actions   = ["ec2:RunInstances"]
+    resources = ["arn:aws:ec2:${var.aws_region}:${local.account_id}:instance/*"]
+
+    condition {
+      test     = "ArnLike"
+      variable = "ec2:LaunchTemplate"
+      values   = ["arn:aws:ec2:${var.aws_region}:${local.account_id}:launch-template/*"]
+    }
+  }
+
+  # The other resources a launch touches. They do not carry the launch
+  # template condition key, so they need their own statement.
+  statement {
+    sid     = "Ec2RunInstancesResources"
+    effect  = "Allow"
+    actions = ["ec2:RunInstances"]
+    resources = [
+      "arn:aws:ec2:${var.aws_region}:${local.account_id}:launch-template/*",
+      "arn:aws:ec2:${var.aws_region}:${local.account_id}:subnet/*",
+      "arn:aws:ec2:${var.aws_region}:${local.account_id}:network-interface/*",
+      "arn:aws:ec2:${var.aws_region}:${local.account_id}:security-group/*",
+      "arn:aws:ec2:${var.aws_region}:${local.account_id}:volume/*",
+      "arn:aws:ec2:${var.aws_region}::image/*",
+    ]
+  }
+
   statement {
     sid       = "EksManage"
     effect    = "Allow"
@@ -196,7 +228,8 @@ data "aws_iam_policy_document" "platform_write" {
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["eks.amazonaws.com"]
+      # EC2 for the node role, which the launch check above also verifies.
+      values = ["eks.amazonaws.com", "ec2.amazonaws.com"]
     }
   }
 
