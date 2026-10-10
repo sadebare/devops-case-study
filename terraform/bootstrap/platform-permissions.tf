@@ -73,6 +73,19 @@ data "aws_iam_policy_document" "platform_read" {
     resources = [local.eks_role_arn_pattern]
   }
 
+  # EKS checks that its service-linked roles exist before creating a
+  # cluster or node group, using the caller's permissions.
+  statement {
+    sid     = "ServiceLinkedRolesRead"
+    effect  = "Allow"
+    actions = ["iam:GetRole"]
+    resources = [
+      "arn:aws:iam::${local.account_id}:role/aws-service-role/eks.amazonaws.com/AWSServiceRoleForAmazonEKS",
+      "arn:aws:iam::${local.account_id}:role/aws-service-role/eks-nodegroup.amazonaws.com/AWSServiceRoleForAmazonEKSNodegroup",
+      "arn:aws:iam::${local.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling",
+    ]
+  }
+
   statement {
     sid       = "LogsDescribe"
     effect    = "Allow"
