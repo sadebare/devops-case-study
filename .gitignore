@@ -1,0 +1,16 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+# Real variable and backend files may hold account-specific values.
+*.tfvars
+!*.tfvars.example
+backend.hcl
+
+# Local
+.env
+.DS_Store
+/app/items-api
+trivy-results.sarif

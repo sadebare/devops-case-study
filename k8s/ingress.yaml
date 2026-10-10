@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: items-api
+  labels:
+    app.kubernetes.io/name: items-api
+  annotations:
+    # Assumes cert-manager with a DNS-01 ClusterIssuer of this name; remove if
+    # TLS certificates are provisioned another way. (An HTTP-01 issuer would
+    # start a solver pod in this namespace, which the default-deny
+    # NetworkPolicy would block unless given its own allow rule.)
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - items-api.example.com
+      secretName: items-api-tls
+  rules:
+    - host: items-api.example.com
+      http:
+        paths:
+          # Only the API is exposed publicly; /healthz and /readyz are for the kubelet.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: items-api
+                port:
+                  name: http

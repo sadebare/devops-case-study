@@ -1,0 +1,59 @@
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, or the AWS VPC
+# CNI with network policy enabled). On a CNI that does not, these objects are
+# accepted and silently do nothing.
+#
+# 1. Baseline: nothing in the namespace may send or receive traffic unless a
+#    later policy allows it. New workloads here start closed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# 2. What items-api actually needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: items-api
+  labels:
+    app.kubernetes.io/name: items-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: items-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the ingress controller's pods, and only on the application port.
+    # namespaceSelector + podSelector in ONE list entry means "both must match".
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # The service keeps its data in memory and calls nothing, so the only
+    # egress allowed is DNS to the cluster resolver. Add one rule per real
+    # dependency (database, queue, downstream API) when they appear.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

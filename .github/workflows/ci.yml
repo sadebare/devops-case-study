@@ -1,0 +1,197 @@
+name: ci
+
+# Pull requests: lint, test, build and scan. Nothing is pushed.
+# Merges to main: the same, then push the scanned image to ECR.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# A newer commit on the same PR supersedes the older run. Runs on main are
+# never cancelled, so every merge produces an image.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Default to read-only; jobs opt in to anything more.
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26"
+  IMAGE_NAME: items-api
+  # Non-secret settings come from repository variables
+  # (Settings -> Secrets and variables -> Actions -> Variables).
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'items-api' }}
+
+# Third-party actions are pinned to a full commit SHA, with the release in a
+# trailing comment. A tag can be moved to different code; a SHA cannot.
+jobs:
+  lint-test:
+    name: Lint and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false # no go.sum to key a cache on; the app has no dependencies
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on: $unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          working-directory: app
+
+      - name: Test
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -n 1 >> "$GITHUB_STEP_SUMMARY"
+
+  terraform:
+    name: Terraform fmt and validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "~> 1.10"
+
+      - name: Format
+        run: terraform fmt -check -recursive terraform
+
+      # -backend=false: validate needs providers and modules, not state, so
+      # this job runs without any cloud credentials.
+      - name: Validate
+        run: |
+          for dir in terraform terraform/bootstrap; do
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+          done
+
+  image:
+    name: Build, scan and push image
+    needs: lint-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # exchange the GitHub OIDC token for short-lived AWS credentials
+      security-events: write # upload Trivy results to the Security tab
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compute image tag
+        id: meta
+        env:
+          # On pull_request, github.sha is a throwaway merge commit; tag with
+          # the commit the author actually pushed.
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          short="${COMMIT::12}"
+          echo "tag=${short}" >> "$GITHUB_OUTPUT"
+          echo "local=${IMAGE_NAME}:${short}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Build once into the runner's local Docker daemon. This exact image is
+      # what gets scanned.
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: ${{ steps.meta.outputs.local }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Report everything to the Security tab first, without failing ...
+      - name: Scan image (report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.local }}
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+
+      # Fork PRs get a read-only token and cannot upload SARIF; skip for those.
+      - name: Upload scan results
+        if: ${{ always() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
+
+      # ... then gate: a fixable HIGH or CRITICAL finding stops the pipeline
+      # before anything reaches the registry.
+      - name: Scan image (gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.local }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Everything below runs only for merges to main. The AWS role's trust
+      # policy also only accepts tokens issued for refs/heads/main, so a pull
+      # request cannot assume it even if this condition were edited out.
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ github.event_name == 'push' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }} # terraform output ci_role_arn
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-${{ github.run_id }}
+
+      - name: Log in to ECR
+        if: ${{ github.event_name == 'push' }}
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      # Retag and push the image that was scanned rather than rebuilding it.
+      # The repository has immutable tags, so there is no "latest": each image
+      # is addressed by the commit it was built from.
+      - name: Push image
+        if: ${{ github.event_name == 'push' }}
+        env:
+          LOCAL: ${{ steps.meta.outputs.local }}
+          REMOTE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+        run: |
+          docker tag "$LOCAL" "$REMOTE"
+          docker push "$REMOTE"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$REMOTE")"
+          {
+            echo "### Image pushed"
+            echo "- Tag: \`$REMOTE\`"
+            echo "- Digest: \`$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"

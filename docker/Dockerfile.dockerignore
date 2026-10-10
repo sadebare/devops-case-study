@@ -1,0 +1,10 @@
+# BuildKit looks for "<Dockerfile name>.dockerignore" next to the Dockerfile
+# before falling back to .dockerignore in the context root. Because the build
+# context is the repository root (so the Dockerfile can COPY app/), a plain
+# docker/.dockerignore would be silently ignored. See README.
+#
+# Allowlist: exclude everything, then let in only what the build needs.
+*
+!app/
+app/**/*_test.go
+app/**/*.md

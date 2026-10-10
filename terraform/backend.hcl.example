@@ -1,0 +1,2 @@
+bucket = "REPLACE_WITH_STATE_BUCKET_NAME" # terraform -chdir=bootstrap output -raw state_bucket_name
+region = "eu-west-1"
