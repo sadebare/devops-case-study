@@ -52,7 +52,7 @@ kind version
 kubectl version --client
 ```
 
-![Tool versions](./docs/images/00-prerequisites.png)
+![Tool versions](./images/tools-verify.png)
 
 ### Option 1: Run With Go
 
@@ -63,15 +63,13 @@ kubectl version --client
     go test -race -v ./...
     ```
 
-    ![Go tests passing](./docs/images/01-go-test.png)
+    ![Go tests passing](./images/go-test-cases.png)
 
-2. Next, we start the app. It prints a JSON log line saying it is listening on `:8080`. Leave this terminal open.
+2. Next, we start the app. It prints a JSON log line saying it is listening on `:8080` (see the screenshot in step 4). Leave this terminal open.
 
     ```bash
     go run .
     ```
-
-    ![App listening on 8080](./docs/images/02-go-run.png)
 
 3. In a second terminal, we call the API:
 
@@ -100,11 +98,11 @@ kubectl version --client
     {"id":1,"name":"stethoscope"}
     ```
 
-    ![curl requests against the Go app](./docs/images/03-go-curl.png)
+    ![curl requests against the Go app](./images/curl-test.png)
 
 4. Lastly, we press `Ctrl+C` in the first terminal. The app logs `shutting down` and waits 5 seconds (`SHUTDOWN_DELAY`) before it exits. This is the graceful shutdown the readiness probe relies on in Kubernetes. Run `cd ..` to go back to the root of the repository.
 
-    ![Graceful shutdown](./docs/images/04-go-shutdown.png)
+    ![App start and graceful shutdown](./images/graceful-shutdown.png)
 
 ### Option 2: Run With Docker
 
@@ -116,7 +114,7 @@ Docker Desktop must be running for this option.
     docker build -f docker/Dockerfile -t items-api:dev --build-arg VERSION=local .
     ```
 
-    ![Docker build](./docs/images/05-docker-build.png)
+    ![Docker build](./images/docker-build.png)
 
 2. Next, we confirm the image is small and does not run as root:
 
@@ -125,7 +123,7 @@ Docker Desktop must be running for this option.
     docker inspect items-api:dev --format 'User: {{.Config.User}}'   #should print User: 65532:65532
     ```
 
-    ![Image size and user](./docs/images/06-docker-image.png)
+    ![Image size and user](./images/docker-inspect.png)
 
 3. Now we run the container. This time we set `API_TOKEN`, so creating an item needs a token.
 
@@ -133,7 +131,7 @@ Docker Desktop must be running for this option.
     docker run --rm --name items-api -p 8080:8080 -e API_TOKEN=local-token items-api:dev
     ```
 
-    ![Container running](./docs/images/07-docker-run.png)
+    ![Container running](./images/docker-run.png)
 
 4. In a second terminal, we call the API. The first POST returns `401` because there is no token, and the second returns `201`.
 
@@ -150,7 +148,7 @@ Docker Desktop must be running for this option.
     curl -s localhost:8080/api/v1/items
     ```
 
-    ![Docker curl with auth](./docs/images/08-docker-curl.png)
+    ![Docker curl with auth](./images/docker-curl.png)
 
 5. Optionally, we can scan the image the same way the pipeline does:
 
@@ -159,7 +157,7 @@ Docker Desktop must be running for this option.
     trivy image --severity HIGH,CRITICAL --ignore-unfixed items-api:dev
     ```
 
-    ![Trivy scan](./docs/images/09-trivy.png)
+    ![Trivy scan](./images/trivy-scan.png)
 
 6. Lastly, we stop the container with `Ctrl+C` or `docker stop items-api`.
 
@@ -174,15 +172,11 @@ Here we apply the same manifests used in production to a cluster that runs insid
     kubectl get nodes
     ```
 
-    ![kind cluster created](./docs/images/10-kind-create.png)
-
 2. kind cannot see the images in our local Docker, so we load the image built in Option 2 into the cluster:
 
     ```bash
     kind load docker-image items-api:dev --name items-api
     ```
-
-    ![Image loaded into kind](./docs/images/11-kind-load.png)
 
 3. Next, we apply the manifests. `k8s/kustomization.yaml` points to the ECR image, so instead of editing that file we render the manifests, swap in the local image and apply the result:
 
@@ -192,16 +186,12 @@ Here we apply the same manifests used in production to a cluster that runs insid
       | kubectl apply -f -
     ```
 
-    ![Manifests applied](./docs/images/12-kubectl-apply.png)
-
 4. We wait for the rollout and check what was created. Both pods should be `Running` and `1/1`. The Ingress has no address, which is expected because there is no NGINX ingress controller in this cluster.
 
     ```bash
     kubectl -n items-api rollout status deployment/items-api
     kubectl -n items-api get pods,svc,ingress,networkpolicy,configmap,secret,pdb
     ```
-
-    ![Resources in the namespace](./docs/images/13-kubectl-get.png)
 
 5. Now we call the API through the Service with a port-forward:
 
@@ -218,16 +208,12 @@ Here we apply the same manifests used in production to a cluster that runs insid
     curl -s localhost:8080/api/v1/items
     ```
 
-    ![curl through port-forward](./docs/images/14-k8s-curl.png)
-
 6. To confirm the NetworkPolicy works, we start a temporary pod in the same namespace and try to reach the API. Only the ingress-nginx pods are allowed in, so the request should time out. The long `--overrides` flag is there because the namespace enforces the `restricted` Pod Security Standard and rejects pods without these settings.
 
     ```bash
     kubectl -n items-api run np-test --rm -it --restart=Never --image=curlimages/curl:8.10.1 \
       --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"np-test","image":"curlimages/curl:8.10.1","args":["-s","-m","5","http://items-api/healthz"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
     ```
-
-    ![NetworkPolicy blocking traffic](./docs/images/15-networkpolicy.png)
 
 7. Lastly, we delete the cluster:
 
@@ -320,10 +306,11 @@ git push -u origin my-change
 **What the pipeline does**
 
 1. Lint and test the application (`gofmt`, `go vet`, `golangci-lint` and `go test`).
-2. Check the Terraform code with `terraform fmt` and `terraform validate`.
-3. Build the Docker image and tag it with the git commit SHA.
-4. Scan the image with Trivy. The pipeline fails if there is a HIGH or CRITICAL vulnerability that has a fix available. The full result is also uploaded to the Security tab of the repository.
-5. Push the image to ECR. This step only runs on a merge to `main`.
+2. Build the Docker image and tag it with the git commit SHA.
+3. Scan the image with Trivy. The pipeline fails if there is a HIGH or CRITICAL vulnerability that has a fix available. The full result is also uploaded to the Security tab of the repository.
+4. Push the image to ECR. This step only runs on a merge to `main`.
+
+Terraform has its own workflow, [.github/workflows/terraform.yml](./.github/workflows/terraform.yml), which only runs when something under `terraform/` changes. It is explained in step 5.
 
 I decided to push the image only on a merge to `main` and only after the scan has passed. On a pull request the image is still built and scanned, but it is not pushed. This way an image that has not been reviewed, or that failed the scan, never gets to the registry.
 
@@ -408,6 +395,22 @@ I provisioned all three with Terraform, and each one is a reusable module in [te
 + `ecr` - The container registry. It has a lifecycle policy that deletes untagged images after 7 days and keeps only the last 30 images. Tags are immutable, so a tag cannot be overwritten.
 + `github-oidc-role` - The IAM role for the CI pipeline. It can only log in to ECR and push images to this one repository. It cannot delete images or touch any other AWS service.
 
+**Region**
+
+Everything runs in `eu-west-1` (Ireland). I am in Nigeria, and Ireland is the closest AWS region with low latency over the West Africa to Europe subsea cables and with every service this project needs. `af-south-1` (Cape Town) is on the same continent, but it is an opt-in region, costs more, and is usually not faster from Lagos. The region is a single variable, so it is easy to change.
+
+```bash
+#point the AWS CLI at the same region
+aws configure set region eu-west-1
+```
+
+**The folders**
+
++ `terraform/bootstrap` - The state bucket, the GitHub OIDC provider and the two roles the Terraform workflow uses. An engineer applies this once, by hand.
++ `terraform` - The ECR repository and the image push role. After the first apply, this is changed only through pull requests and applied by GitHub Actions.
+
+The workflow's own roles are in `bootstrap` on purpose. If they were in the folder the pipeline applies, a merged pull request could give the pipeline more permissions.
+
 **How to run it**
 
 1. First, we authenticate to AWS:
@@ -416,15 +419,16 @@ I provisioned all three with Terraform, and each one is a reusable module in [te
     aws configure
     ```
 
-2. We need the S3 bucket to exist before we can use it as a remote backend, so we create it first from the `bootstrap` folder. This is only done once.
+2. We create the state bucket, the OIDC provider and the Terraform roles from the `bootstrap` folder. This is only done once.
 
     ```bash
     cd terraform/bootstrap
+    cp terraform.tfvars.example terraform.tfvars   #then fill in your values
     terraform init
-    terraform apply -var 'state_bucket_name=YOUR_BUCKET_NAME'
+    terraform apply
     ```
 
-3. Now that we have the bucket, we can provision the ECR repository and the IAM role, with the state stored remotely in that bucket:
+3. Now that we have the bucket, we provision the ECR repository and the image push role, with the state stored remotely in that bucket. This first apply is done locally, after that GitHub Actions takes over.
 
     ```bash
     cd ..
@@ -438,13 +442,31 @@ I provisioned all three with Terraform, and each one is a reusable module in [te
     terraform apply
     ```
 
-4. Lastly, we get the outputs and add them as repository variables in GitHub as shown in step 3:
+4. We add the outputs as repository variables in GitHub, so both workflows can find AWS:
 
     ```bash
-    terraform output
+    REPO=your-github-user/your-repo
+
+    gh variable set AWS_REGION        -R $REPO -b "$(terraform output -raw aws_region)"
+    gh variable set AWS_ROLE_ARN      -R $REPO -b "$(terraform output -raw ci_role_arn)"
+    gh variable set ECR_REPOSITORY    -R $REPO -b "$(terraform output -raw ecr_repository_name)"
+    gh variable set TF_STATE_BUCKET   -R $REPO -b "$(terraform -chdir=bootstrap output -raw state_bucket_name)"
+    gh variable set TF_PLAN_ROLE_ARN  -R $REPO -b "$(terraform -chdir=bootstrap output -raw terraform_plan_role_arn)"
+    gh variable set TF_APPLY_ROLE_ARN -R $REPO -b "$(terraform -chdir=bootstrap output -raw terraform_apply_role_arn)"
     ```
 
-The bucket name and region for the backend are passed in through `backend.hcl` and not hardcoded, because they are different for every AWS account. Both `backend.hcl` and `terraform.tfvars` are in `.gitignore`.
+5. Lastly, we create the `production` environment in GitHub (Settings > Environments) and add ourselves as a required reviewer. Every apply then waits for an approval.
+
+**Terraform in the pipeline**
+
+| Event | What runs | AWS role |
+|---|---|---|
+| Pull request that changes `terraform/` | `fmt`, `validate` and `plan`. The plan is printed in the run summary. | `items-api-terraform-plan`, which can only read. |
+| Merge to `main` | `fmt`, `validate`, then `plan` and `apply` in the `production` environment. | `items-api-terraform-apply`, which can only manage the ECR repository and the image push role. |
+
+The roles are tied to GitHub, not to the workflow file. The plan role only trusts tokens from pull requests, and the apply role only trusts jobs running in the `production` environment, so editing the workflow in a branch does not let a pull request apply anything. Only one Terraform run can happen at a time, so two applies never fight over the state.
+
+The bucket name and region for the backend are passed in through `backend.hcl` and not hardcoded, because they are different for every AWS account. Both `backend.hcl` and `terraform.tfvars` are in `.gitignore`. In the pipeline, the same values come from the repository variables.
 
 State locking uses the S3 lock file (`use_lockfile = true`), so there is no need for a DynamoDB table.
 
@@ -477,11 +499,11 @@ So my approach is to make sure the plan shows no changes before I apply anything
 
 ## Assumptions
 
-+ AWS is the cloud provider, with one account and one region (`eu-west-1` by default).
++ AWS is the cloud provider, with one account and one region (`eu-west-1`, Ireland, the closest to Nigeria).
 + The Kubernetes cluster already exists (for example EKS) and its nodes can pull images from ECR. Creating the cluster is not part of this task.
 + The NGINX ingress controller is installed in the `ingress-nginx` namespace.
 + DNS and the TLS certificate for the ingress hostname are handled by the platform (I assumed cert-manager).
-+ Terraform is run by an engineer with the right permissions. The CI role cannot create or change infrastructure.
++ The `bootstrap` folder is applied by an engineer with the right permissions. Everything else is applied by GitHub Actions. The image push role cannot create or change infrastructure.
 
 ## Trade-offs And Shortcuts
 
@@ -501,4 +523,4 @@ So my approach is to make sure the plan shows no changes before I apply anything
 + GitOps - Use Argo CD to watch the manifests in git and deploy to the cluster. The pipeline would then only update the image tag in git, and a rollback is a `git revert`.
 + Observability - Expose a `/metrics` endpoint for Prometheus, build dashboards in Grafana and set up alerts on error rate and latency.
 + Environments - Add Kustomize overlays for dev, staging and production.
-+ Terraform in the pipeline - Run `terraform plan` on pull requests and `terraform apply` on merge.
++ Permissions boundary - The apply role can edit the image push role. A boundary on that role would cap what it can ever be given, even by a reviewed change.

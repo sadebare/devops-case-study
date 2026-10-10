@@ -1,7 +1,9 @@
 variable "aws_region" {
   description = "AWS region to deploy into."
   type        = string
-  default     = "eu-west-1"
+  # Ireland. The closest AWS region to Nigeria with good latency over the
+  # West Africa to Europe subsea cables, and a full set of AWS services.
+  default = "eu-west-1"
 }
 
 variable "service_name" {
@@ -28,9 +30,9 @@ variable "ci_allowed_refs" {
 }
 
 variable "create_github_oidc_provider" {
-  description = "Create the account-wide GitHub OIDC provider. Set to false if the account already has one."
+  description = "Create the account-wide GitHub OIDC provider. False by default because ./bootstrap creates it for the terraform roles."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "ecr_max_image_count" {
