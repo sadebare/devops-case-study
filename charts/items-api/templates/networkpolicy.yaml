@@ -1,0 +1,63 @@
+{{- if .Values.networkPolicy.enabled }}
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, or the AWS VPC
+# CNI with network policy enabled, as in terraform/modules/eks). On a CNI that
+# does not, these objects are accepted and silently do nothing.
+#
+# 1. Baseline: nothing in the namespace may send or receive traffic unless a
+#    later policy allows it. New workloads here start closed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  labels:
+    {{- include "items-api.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# 2. What items-api actually needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "items-api.name" . }}
+  labels:
+    {{- include "items-api.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "items-api.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the ingress controller's pods, and only on the application port.
+    # namespaceSelector + podSelector in ONE list entry means "both must match".
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressControllerPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.PORT | int }}
+  egress:
+    # The service keeps its data in memory and calls nothing, so the only
+    # egress allowed is DNS to the cluster resolver. Add one rule per real
+    # dependency (database, queue, downstream API) when they appear.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

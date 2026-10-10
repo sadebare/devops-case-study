@@ -14,7 +14,8 @@ The application is kept very simple on purpose. The focus is on the infrastructu
 + Terraform 1.10 or newer - To provision the AWS resources.
 + AWS CLI - To authenticate to AWS.
 + A Kubernetes cluster with the NGINX ingress controller installed and a CNI that enforces NetworkPolicy (for example Calico or Cilium).
-+ kind 0.24 or newer - Only needed to run the Kubernetes manifests on a local cluster.
++ kind 0.24 or newer - Only needed to run the Helm chart on a local cluster.
++ Helm 3.8 or newer - To install the app chart and Argo CD.
 
 ## Project Structure
 
@@ -22,11 +23,12 @@ The application is kept very simple on purpose. The focus is on the infrastructu
 .
 ├── app/                  # The Go REST API and its tests
 ├── docker/               # Dockerfile and its .dockerignore
-├── .github/workflows/    # GitHub Actions workflow
-├── k8s/                  # Kubernetes manifests
+├── .github/workflows/    # ci.yml (app and image) and terraform.yml
+├── charts/items-api/     # Helm chart for the app
+├── gitops/               # Argo CD values, the root app and the app definitions
 ├── terraform/
-│   ├── bootstrap/        # Creates the S3 bucket for remote state (run once)
-│   ├── modules/          # ecr, github-oidc-role, state-bucket
+│   ├── bootstrap/        # State bucket and the pipeline's AWS roles (run by hand)
+│   ├── modules/          # ecr, github-oidc-role, state-bucket, vpc, eks
 │   └── *.tf              # Root config that uses the modules
 └── README.md
 ```
@@ -37,7 +39,7 @@ There are three ways to run the service on a laptop. Each one builds on the one 
 
 1. With Go - The quickest way to see the API working.
 2. With Docker - Runs the same image the CI pipeline builds.
-3. On a local Kubernetes cluster (kind) - Applies the real manifests from `k8s/`.
+3. On a local Kubernetes cluster (kind) - Installs the real Helm chart from `charts/items-api`.
 
 All commands are run from the root of the repository unless stated otherwise. On macOS, the tools can be installed with Homebrew:
 
@@ -163,7 +165,7 @@ Docker Desktop must be running for this option.
 
 ### Option 3: Run On A Local Kubernetes Cluster (kind)
 
-Here we apply the same manifests used in production to a cluster that runs inside Docker. The default network plugin in kind 0.24 and newer enforces NetworkPolicy, so the policies in `k8s/networkpolicy.yaml` are active.
+Here we install the same Helm chart that Argo CD deploys to EKS, on a cluster that runs inside Docker. The default network plugin in kind 0.24 and newer enforces NetworkPolicy, so the chart's network policies are active.
 
 1. First, we create the cluster:
 
@@ -178,19 +180,24 @@ Here we apply the same manifests used in production to a cluster that runs insid
     kind load docker-image items-api:dev --name items-api
     ```
 
-3. Next, we apply the manifests. `k8s/kustomization.yaml` points to the ECR image, so instead of editing that file we render the manifests, swap in the local image and apply the result:
+3. Next, we create the namespace with the `restricted` Pod Security Standard (on EKS, Argo CD adds these labels), then install the chart with the local image. `secret.create=true` makes the chart create the token Secret, which is only done on a local cluster.
 
     ```bash
-    kubectl kustomize k8s/ \
-      | sed 's#123456789012.dkr.ecr.eu-west-1.amazonaws.com/items-api:REPLACE_WITH_COMMIT_SHA#items-api:dev#' \
-      | kubectl apply -f -
+    kubectl create namespace items-api
+    kubectl label namespace items-api \
+      pod-security.kubernetes.io/enforce=restricted \
+      pod-security.kubernetes.io/warn=restricted
+
+    helm install items-api charts/items-api -n items-api \
+      --set image.repository=items-api --set image.tag=dev \
+      --set secret.create=true --set secret.apiToken=local-token
     ```
 
-4. We wait for the rollout and check what was created. Both pods should be `Running` and `1/1`. The Ingress has no address, which is expected because there is no NGINX ingress controller in this cluster.
+4. We wait for the rollout and check what was created. Both pods should be `Running` and `1/1`. There is no Ingress, because it is turned off by default (`ingress.enabled`) and this cluster has no NGINX ingress controller.
 
     ```bash
     kubectl -n items-api rollout status deployment/items-api
-    kubectl -n items-api get pods,svc,ingress,networkpolicy,configmap,secret,pdb
+    kubectl -n items-api get pods,svc,networkpolicy,configmap,secret,pdb
     ```
 
 5. Now we call the API through the Service with a port-forward:
@@ -199,12 +206,12 @@ Here we apply the same manifests used in production to a cluster that runs insid
     kubectl -n items-api port-forward svc/items-api 8080:80
     ```
 
-    In a second terminal (the token is the placeholder `REPLACE_ME` from `k8s/secret.yaml`):
+    In a second terminal (the token is the `local-token` we set in step 3):
 
     ```bash
     curl -s localhost:8080/healthz
     curl -s -X POST localhost:8080/api/v1/items \
-      -H 'Authorization: Bearer REPLACE_ME' -d '{"name":"stethoscope"}'
+      -H 'Authorization: Bearer local-token' -d '{"name":"stethoscope"}'
     curl -s localhost:8080/api/v1/items
     ```
 
@@ -227,8 +234,9 @@ Here we apply the same manifests used in production to a cluster that runs insid
 |---|---|
 | `address already in use` on port 8080 | Something else is using the port. Use another one, for example `PORT=9090 go run .` or `-p 9090:8080`. |
 | `Cannot connect to the Docker daemon` | Docker Desktop is not running. Open it and wait for it to start. |
-| Pods stuck in `ImagePullBackOff` | The image was not loaded into kind, or the `sed` did not match. Run step 2 again and confirm the image with `kubectl -n items-api get deploy items-api -o jsonpath='{..image}'`, which should print `items-api:dev`. |
-| POST returns `401` | Send the header `Authorization: Bearer <API_TOKEN>`. In the cluster the token is `REPLACE_ME`. |
+| Pods stuck in `ImagePullBackOff` | The image was not loaded into kind. Run step 2 again and confirm the image with `kubectl -n items-api get deploy items-api -o jsonpath='{..image}'`, which should print `items-api:dev`. |
+| POST returns `401` | Send the header `Authorization: Bearer <API_TOKEN>`. On kind the token is `local-token`. |
+| Pods stuck in `CreateContainerConfigError` | The `items-api-secrets` Secret is missing. On kind, install with `secret.create=true`. On EKS, create it by hand as shown in step 4. |
 
 ## Procedures
 
@@ -328,46 +336,76 @@ For this to work, we need to add three repository variables in GitHub under Sett
 
 Also, every action used in the workflow is pinned to a commit SHA and not a tag, so the code we run cannot be changed without us knowing.
 
-### 4. Kubernetes Manifests
+### 4. Kubernetes (Helm And GitOps With Argo CD)
 
-The manifests are in the [k8s](./k8s) folder. I used a `kustomization.yaml` so that everything can be applied with a single command and the image is set in one place.
+The app is packaged as a Helm chart in [charts/items-api](./charts/items-api), and it is deployed to EKS by [Argo CD](https://argo-cd.readthedocs.io/), which is also installed with Helm. Git is the source of truth: Argo CD watches this repository and makes the cluster match it, so a deploy is a commit and a rollback is a `git revert`.
 
-**How to apply the manifests**
+```
+gitops/
+├── argocd/values.yaml    # values for the official Argo CD chart
+├── root.yaml             # "app of apps": deploys everything in gitops/apps/
+└── apps/items-api.yaml   # the items-api Application, its image tag and its AppProject
+```
 
-1. First, we point the deployment to the image that the pipeline pushed. Open `k8s/kustomization.yaml` and update the `images` section with your ECR registry and the commit SHA tag (the pipeline prints the tag at the end of its run).
+**How to install it on EKS (once)**
 
-2. We also need to replace the placeholder values, which are the hostname in `k8s/ingress.yaml` and the value in `k8s/secret.yaml`.
-
-3. Now we can apply the manifests:
+1. First, we point `kubectl` at the EKS cluster. Check the context before running anything else, so nothing lands on another cluster.
 
     ```bash
-    #optional, to see what will be created
-    kubectl diff -k k8s/
-
-    #apply everything
-    kubectl apply -k k8s/
+    aws eks update-kubeconfig --region eu-west-1 --name items-api
+    kubectl config current-context   #should end in cluster/items-api
     ```
 
-4. Lastly, we confirm the deployment is running:
+2. We install Argo CD with Helm:
 
     ```bash
-    kubectl -n items-api rollout status deployment/items-api
-    kubectl -n items-api get pods,svc,ingress,networkpolicy
+    helm repo add argo https://argoproj.github.io/argo-helm
+    helm upgrade --install argocd argo/argo-cd --version 10.10.2 \
+      --namespace argocd --create-namespace -f gitops/argocd/values.yaml
+    kubectl -n argocd rollout status deploy/argocd-server
+    ```
 
-    #to test the app without going through the ingress
+3. We hand control to git by applying the root Application. Argo CD then creates the `items-api` namespace and deploys the chart.
+
+    ```bash
+    kubectl apply -f gitops/root.yaml
+    ```
+
+4. The token Secret is the one thing that is not in git, so we create it by hand. The pods wait in `CreateContainerConfigError` until it exists.
+
+    ```bash
+    kubectl -n items-api create secret generic items-api-secrets \
+      --from-literal=API_TOKEN="$(openssl rand -hex 24)"
+    ```
+
+5. Lastly, we check the result in the Argo CD UI and through a port-forward:
+
+    ```bash
+    #UI on https://localhost:8443, user admin
+    kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
+    kubectl -n argocd port-forward svc/argocd-server 8443:443
+
+    #the app
+    kubectl -n items-api get pods,svc,networkpolicy,pdb
     kubectl -n items-api port-forward svc/items-api 8080:80
     curl localhost:8080/healthz
     ```
 
+**How to deploy a new version**
+
+CI prints the image tag at the end of each run on `main`. We change `image.tag` in [gitops/apps/items-api.yaml](./gitops/apps/items-api.yaml) to that tag and merge. Argo CD picks up the change within about three minutes and rolls out the new pods. Manual `kubectl` changes are undone automatically (`selfHeal`), so the cluster cannot drift from git.
+
+The `items-api` Application runs in its own AppProject, which can only deploy this repository into the `items-api` namespace, instead of the default project that can deploy anything anywhere.
+
 **What was created**
 
-+ Namespace - `items-api`, with the restricted Pod Security Standard enforced.
++ Namespace - `items-api`, created by Argo CD with the restricted Pod Security Standard enforced.
 + Deployment - 2 replicas with resource requests and limits, plus startup, liveness and readiness probes. The container runs as non-root with a read-only filesystem and all Linux capabilities dropped.
 + Service - A ClusterIP service on port 80 that forwards to the container on port 8080.
-+ Ingress - Exposes only the `/api` path through NGINX with TLS. The health endpoints are not exposed to the internet.
++ Ingress - Turned off by default (`ingress.enabled`), because there is no ingress controller on the cluster yet. When enabled, it exposes only the `/api` path through NGINX with TLS, so the health endpoints are not exposed to the internet.
 + NetworkPolicy - Explained below.
 + ConfigMap - The non-sensitive configuration of the app.
-+ Secret - A placeholder for the API token.
++ Secret - Not in the chart by default. It is created by hand (see step 4), and the chart only creates it on a local cluster.
 + ServiceAccount and PodDisruptionBudget - A dedicated service account with no token mounted, and a budget that keeps at least one pod running when a node is drained.
 
 **NetworkPolicy**
@@ -385,7 +423,7 @@ The liveness and readiness probes use different endpoints. Liveness (`/healthz`)
 
 **Secrets**
 
-The `secret.yaml` file only has a placeholder value (`REPLACE_ME`). A real secret should never be committed to git. In a real setup I would store the value in AWS Secrets Manager and use External Secrets Operator to sync it into the cluster.
+A real secret should never be committed to git, so the chart only refers to the `items-api-secrets` Secret and does not create it. Today it is created by hand. The next step is to store the value in AWS Secrets Manager and let External Secrets Operator sync it into the cluster, so even that step goes through git.
 
 ### 5. Infrastructure as Code (Terraform)
 
@@ -483,7 +521,7 @@ I kept the cluster as small as possible while still following the usual standard
 + Nodes run in private subnets with no public IP, and reach the internet through one NAT gateway.
 + Pods cannot borrow the node's IAM role, because the instance metadata service needs IMDSv2 with a hop limit of 1.
 + Access is through EKS access entries, not the `aws-auth` ConfigMap. The pipeline role that creates the cluster is not made an admin. Only the principals in `EKS_ADMIN_PRINCIPAL_ARNS` are.
-+ The VPC CNI runs with network policy enforcement turned on, so the policies in `k8s/networkpolicy.yaml` are applied.
++ The VPC CNI runs with network policy enforcement turned on, so the chart's network policies are applied.
 + VPC CNI, kube-proxy and CoreDNS are EKS managed add-ons, so they are upgraded with the cluster.
 + The audit and authenticator logs go to CloudWatch and are kept for 30 days.
 + The cluster stays on standard support. Extended support costs six times more per hour, so an old version gets upgraded instead.
@@ -537,7 +575,8 @@ So my approach is to make sure the plan shows no changes before I apply anything
 + There is one NAT gateway instead of one per availability zone. If its zone goes down, the nodes in the other zone lose internet access until it recovers.
 + The EKS API endpoint is public, so `kubectl` works from a laptop. It is open to any IP by default, and `eks_public_access_cidrs` narrows it.
 + The VPC CNI uses the node role instead of its own Pod Identity role. With one app on the cluster this is simpler, and it is the first thing to change as more apps arrive.
-+ The pipeline stops at pushing the image. Deploying to the cluster is done manually with `kubectl apply`. I did not want to give the pipeline access to the cluster. I would use GitOps for this instead.
++ The pipeline has no access to the cluster. It pushes the image, and Argo CD pulls the change from git. Bumping the image tag in git is still a manual commit for now.
++ Argo CD itself is installed once with `helm` and is not yet managed by Argo CD. It runs one replica of each component with no SSO, and the UI is only reachable through a port-forward.
 + There is only one environment. There is no separate dev, staging and production.
 + I did not set a CPU limit on the container, only a CPU request and a memory limit. A CPU limit can slow the app down even when the node has free CPU. If the platform requires one, it is a one line change in the deployment.
 + The Trivy scan ignores vulnerabilities that do not have a fix yet, because failing the pipeline on something we cannot fix only blocks the team. They still show up in the Security tab.
@@ -550,7 +589,10 @@ So my approach is to make sure the plan shows no changes before I apply anything
 
 ## What I Would Do Next
 
-+ GitOps - Use Argo CD to watch the manifests in git and deploy to the cluster. The pipeline would then only update the image tag in git, and a rollback is a `git revert`.
++ Automatic image bumps - After pushing an image, CI opens a pull request that updates `image.tag` in `gitops/apps/items-api.yaml`, so a deploy is just a review and a merge.
++ Argo CD manages itself - Add an Application for the Argo CD chart to `gitops/apps/`, so upgrading Argo CD is also a pull request.
++ External Secrets Operator - Sync the API token from AWS Secrets Manager instead of creating the Secret by hand.
++ Restrict image registries - An admission policy (Kyverno) that only lets pods use images from our ECR. The node role already limits ECR pulls to our repository, but it cannot stop a pod from pulling from Docker Hub.
 + Observability - Expose a `/metrics` endpoint for Prometheus, build dashboards in Grafana and set up alerts on error rate and latency.
 + Environments - Add Kustomize overlays for dev, staging and production.
 + Permissions boundary - The apply role can edit the image push role. A boundary on that role would cap what it can ever be given, even by a reviewed change.

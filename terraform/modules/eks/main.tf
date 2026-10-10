@@ -72,7 +72,7 @@ resource "aws_eks_access_policy_association" "admin" {
 
 # Networking must exist before nodes join, or they never become Ready.
 # enableNetworkPolicy turns on the policy agent, which is what enforces
-# k8s/networkpolicy.yaml. Without it those policies are silently ignored.
+# the chart's NetworkPolicies. Without it those policies are silently ignored.
 resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = aws_eks_cluster.this.name
   addon_name                  = "vpc-cni"

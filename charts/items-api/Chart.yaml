@@ -1,0 +1,7 @@
+apiVersion: v2
+name: items-api
+description: The items-api service, hardened to the restricted Pod Security Standard.
+type: application
+version: 0.1.0
+# The image tag is set per environment (values: image.tag), not here.
+appVersion: "dev"

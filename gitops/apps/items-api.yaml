@@ -1,0 +1,59 @@
+# A project that can only deploy this repository into the items-api
+# namespace, instead of the wide-open "default" project. Created first
+# (sync wave -1) so the Application below can use it.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: items-api
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  description: The items-api service.
+  sourceRepos:
+    - https://github.com/sadebare/devops-case-study.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: items-api
+  # Only the namespace itself may be created at cluster scope.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: items-api
+  namespace: argocd
+  # Deleting this Application also deletes what it deployed.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: items-api
+  source:
+    repoURL: https://github.com/sadebare/devops-case-study.git
+    targetRevision: main
+    path: charts/items-api
+    helm:
+      valuesObject:
+        image:
+          repository: 172316546414.dkr.ecr.eu-west-1.amazonaws.com/items-api
+          # The commit SHA tag pushed by CI. Changing this line is a deploy;
+          # reverting it is a rollback.
+          tag: "d849db01c1c1"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: items-api
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true # undo manual kubectl changes
+    syncOptions:
+      - CreateNamespace=true
+    # Labels for the namespace Argo CD creates: reject any pod that is not
+    # "restricted" under Pod Security Admission.
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted

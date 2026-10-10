@@ -1,0 +1,13 @@
+# Keeps at least one replica running through voluntary disruptions such as
+# node drains and cluster upgrades.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "items-api.name" . }}
+  labels:
+    {{- include "items-api.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "items-api.selectorLabels" . | nindent 6 }}

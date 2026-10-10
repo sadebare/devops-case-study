@@ -1,5 +1,5 @@
 output "ecr_repository_url" {
-  description = "Registry URL for the image. Use in k8s/kustomization.yaml (images[].newName)."
+  description = "Registry URL for the image. Use as image.repository in gitops/apps/items-api.yaml."
   value       = module.ecr.repository_url
 }
 

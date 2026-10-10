@@ -1,0 +1,63 @@
+replicaCount: 2
+
+image:
+  # ECR repository URL, e.g. 123456789012.dkr.ecr.eu-west-1.amazonaws.com/items-api
+  repository: items-api
+  # Commit SHA tag pushed by CI. Required: the chart refuses to render without
+  # it, so nothing is ever deployed as "latest".
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Non-sensitive settings, passed to the app as environment variables.
+config:
+  PORT: "8080"
+  LOG_LEVEL: "info"
+  # How long the app keeps serving after SIGTERM while it is removed from
+  # Service endpoints. Must stay below terminationGracePeriodSeconds.
+  SHUTDOWN_DELAY: "5s"
+
+# The Secret holding API_TOKEN. Real values must never be committed, so by
+# default the chart only references a Secret created outside git (by hand
+# today, by External Secrets Operator later). create=true is for local
+# clusters only, with the token passed on the command line.
+secret:
+  create: false
+  name: items-api-secrets
+  apiToken: ""
+
+terminationGracePeriodSeconds: 30
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    # Memory limit = hard ceiling (OOM-kill beats node pressure).
+    # No CPU limit on purpose: CPU is compressible, and a limit causes
+    # throttling even when the node is idle. The request still guarantees a
+    # fair share. See README.
+    memory: 64Mi
+
+service:
+  port: 80
+
+ingress:
+  enabled: false
+  className: nginx
+  host: items-api.example.com
+  # Assumes cert-manager with a DNS-01 ClusterIssuer of this name. (An HTTP-01
+  # issuer would start a solver pod in this namespace, which the default-deny
+  # NetworkPolicy would block unless given its own allow rule.)
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  tlsSecretName: items-api-tls
+
+networkPolicy:
+  enabled: true
+  # Where the ingress controller runs. Only its pods may reach the app.
+  ingressControllerNamespace: ingress-nginx
+  ingressControllerPodLabels:
+    app.kubernetes.io/name: ingress-nginx
+
+podDisruptionBudget:
+  minAvailable: 1
