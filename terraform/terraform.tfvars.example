@@ -9,3 +9,10 @@ github_repository = "your-github-user/your-repo"
 # Only if the repository uses GitHub's immutable OIDC subject format
 # (gh api repos/OWNER/REPO/actions/oidc/customization/sub shows sub_claim_prefix).
 # github_oidc_subject_prefix = "repo:your-github-user@12345/your-repo@67890"
+
+# Who gets cluster admin. In the terraform workflow this comes from the
+# EKS_ADMIN_PRINCIPAL_ARNS repository variable.
+eks_admin_principal_arns = ["arn:aws:iam::123456789012:user/your-user"]
+
+# Narrow the public API endpoint to your own IP.
+# eks_public_access_cidrs = ["203.0.113.10/32"]

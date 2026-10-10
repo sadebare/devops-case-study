@@ -58,3 +58,38 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "vpc_cidr" {
+  description = "CIDR block of the VPC the cluster runs in."
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+variable "eks_kubernetes_version" {
+  description = "Kubernetes version of the EKS cluster."
+  type        = string
+  default     = "1.37"
+}
+
+variable "eks_admin_principal_arns" {
+  description = "IAM users or roles given cluster admin. No default on purpose: a missing value fails the plan instead of locking everyone out."
+  type        = list(string)
+}
+
+variable "eks_public_access_cidrs" {
+  description = "CIDRs allowed to reach the cluster's public API endpoint."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "eks_node_instance_types" {
+  description = "Instance types for the worker nodes."
+  type        = list(string)
+  default     = ["t3.medium"]
+}
+
+variable "eks_node_count" {
+  description = "Number of worker nodes."
+  type        = number
+  default     = 2
+}

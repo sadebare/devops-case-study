@@ -40,6 +40,9 @@ env:
   # This repository uses GitHub's immutable OIDC subject format, which carries
   # the owner and repository IDs so the trust survives a rename.
   TF_VAR_github_oidc_subject_prefix: repo:${{ github.repository_owner }}@${{ github.repository_owner_id }}/${{ github.event.repository.name }}@${{ github.repository_id }}
+  # JSON list, e.g. ["arn:aws:iam::123456789012:user/me"]. If it is missing
+  # the plan fails rather than removing every cluster admin.
+  TF_VAR_eks_admin_principal_arns: ${{ vars.EKS_ADMIN_PRINCIPAL_ARNS }}
 
 # Third-party actions are pinned to a full commit SHA, with the release in a
 # trailing comment. A tag can be moved to different code; a SHA cannot.
@@ -121,7 +124,7 @@ jobs:
     needs: validate
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60 # creating or upgrading an EKS cluster takes 10 to 20 minutes
     # Running in this environment is what lets the job assume the apply role,
     # and required reviewers on it turn the apply into an approval step.
     environment: production

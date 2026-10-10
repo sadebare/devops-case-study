@@ -17,3 +17,13 @@ output "aws_region" {
   description = "Set as the AWS_REGION repository variable in GitHub."
   value       = var.aws_region
 }
+
+output "eks_cluster_name" {
+  description = "Name of the EKS cluster."
+  value       = module.eks.cluster_name
+}
+
+output "eks_kubeconfig_command" {
+  description = "Run this to point kubectl at the cluster."
+  value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks.cluster_name}"
+}

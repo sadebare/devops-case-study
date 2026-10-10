@@ -16,3 +16,25 @@ module "ci_role" {
   ecr_repository_arns  = [module.ecr.repository_arn]
   create_oidc_provider = var.create_github_oidc_provider
 }
+
+module "vpc" {
+  source = "./modules/vpc"
+
+  name = var.service_name
+  cidr = var.vpc_cidr
+}
+
+module "eks" {
+  source = "./modules/eks"
+
+  name                 = var.service_name
+  kubernetes_version   = var.eks_kubernetes_version
+  subnet_ids           = module.vpc.private_subnet_ids
+  public_access_cidrs  = var.eks_public_access_cidrs
+  admin_principal_arns = var.eks_admin_principal_arns
+  node_instance_types  = var.eks_node_instance_types
+  node_count           = var.eks_node_count
+
+  # The nodes can pull this one repository and nothing else of ours.
+  ecr_repository_arns = [module.ecr.repository_arn]
+}

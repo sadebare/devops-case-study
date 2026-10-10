@@ -394,6 +394,8 @@ I provisioned all three with Terraform, and each one is a reusable module in [te
 + `state-bucket` - An S3 bucket for the Terraform remote state. It is versioned, encrypted and blocked from public access.
 + `ecr` - The container registry. It has a lifecycle policy that deletes untagged images after 7 days and keeps only the last 30 images. Tags are immutable, so a tag cannot be overwritten.
 + `github-oidc-role` - The IAM role for the CI pipeline. It can only log in to ECR and push images to this one repository. It cannot delete images or touch any other AWS service.
++ `vpc` - A new VPC across two availability zones. Public subnets hold the load balancers and the NAT gateway, private subnets hold the nodes. The default security group has every rule removed.
++ `eks` - A minimal EKS cluster with two `t3.medium` nodes in the private subnets. Explained below.
 
 **Region**
 
@@ -407,7 +409,7 @@ aws configure set region eu-west-1
 **The folders**
 
 + `terraform/bootstrap` - The state bucket, the GitHub OIDC provider and the two roles the Terraform workflow uses. An engineer applies this once, by hand.
-+ `terraform` - The ECR repository and the image push role. After the first apply, this is changed only through pull requests and applied by GitHub Actions.
++ `terraform` - The ECR repository, the image push role, the VPC and the EKS cluster. After the first apply, this is changed only through pull requests and applied by GitHub Actions.
 
 The workflow's own roles are in `bootstrap` on purpose. If they were in the folder the pipeline applies, a merged pull request could give the pipeline more permissions.
 
@@ -453,6 +455,9 @@ The workflow's own roles are in `bootstrap` on purpose. If they were in the fold
     gh variable set TF_STATE_BUCKET   -R $REPO -b "$(terraform -chdir=bootstrap output -raw state_bucket_name)"
     gh variable set TF_PLAN_ROLE_ARN  -R $REPO -b "$(terraform -chdir=bootstrap output -raw terraform_plan_role_arn)"
     gh variable set TF_APPLY_ROLE_ARN -R $REPO -b "$(terraform -chdir=bootstrap output -raw terraform_apply_role_arn)"
+
+    #who gets admin on the EKS cluster, as a JSON list
+    gh variable set EKS_ADMIN_PRINCIPAL_ARNS -R $REPO -b '["arn:aws:iam::123456789012:user/your-user"]'
     ```
 
 5. Lastly, we create the `production` environment in GitHub (Settings > Environments) and add ourselves as a required reviewer. Every apply then waits for an approval.
@@ -462,13 +467,35 @@ The workflow's own roles are in `bootstrap` on purpose. If they were in the fold
 | Event | What runs | AWS role |
 |---|---|---|
 | Pull request that changes `terraform/` | `fmt`, `validate` and `plan`. The plan is printed in the run summary. | `items-api-terraform-plan`, which can only read. |
-| Merge to `main` | `fmt`, `validate`, then `plan` and `apply` in the `production` environment. | `items-api-terraform-apply`, which can only manage the ECR repository and the image push role. |
+| Merge to `main` | `fmt`, `validate`, then `plan` and `apply` in the `production` environment. | `items-api-terraform-apply`, which can only manage the ECR repository, the image push role, the VPC and the EKS cluster. |
 
 The roles are tied to GitHub, not to the workflow file. The plan role only trusts tokens from pull requests, and the apply role only trusts jobs running in the `production` environment, so editing the workflow in a branch does not let a pull request apply anything. Only one Terraform run can happen at a time, so two applies never fight over the state.
 
 The bucket name and region for the backend are passed in through `backend.hcl` and not hardcoded, because they are different for every AWS account. Both `backend.hcl` and `terraform.tfvars` are in `.gitignore`. In the pipeline, the same values come from the repository variables.
 
 State locking uses the S3 lock file (`use_lockfile = true`), so there is no need for a DynamoDB table.
+
+**The EKS cluster**
+
+I kept the cluster as small as possible while still following the usual standards:
+
++ Nodes only pull from our ECR. The node role does not get the usual `AmazonEC2ContainerRegistryReadOnly` policy, which can read every repository in the account. It can only pull from the `items-api` repository, plus the AWS account that hosts the EKS add-on images (VPC CNI, kube-proxy, CoreDNS), without which the nodes never become ready. It cannot push or delete anything.
++ Nodes run in private subnets with no public IP, and reach the internet through one NAT gateway.
++ Pods cannot borrow the node's IAM role, because the instance metadata service needs IMDSv2 with a hop limit of 1.
++ Access is through EKS access entries, not the `aws-auth` ConfigMap. The pipeline role that creates the cluster is not made an admin. Only the principals in `EKS_ADMIN_PRINCIPAL_ARNS` are.
++ The VPC CNI runs with network policy enforcement turned on, so the policies in `k8s/networkpolicy.yaml` are applied.
++ VPC CNI, kube-proxy and CoreDNS are EKS managed add-ons, so they are upgraded with the cluster.
++ The audit and authenticator logs go to CloudWatch and are kept for 30 days.
++ The cluster stays on standard support. Extended support costs six times more per hour, so an old version gets upgraded instead.
+
+Once it is applied, we point `kubectl` at it:
+
+```bash
+aws eks update-kubeconfig --region eu-west-1 --name items-api
+kubectl get nodes
+```
+
+This costs roughly $170 a month while it runs: about $73 for EKS, $60 for the two nodes and $35 or more for the NAT gateway. Running `terraform destroy` removes the VPC and the cluster when they are not needed.
 
 ### Migration Question: Importing An Existing Resource Into Terraform
 
@@ -507,6 +534,9 @@ So my approach is to make sure the plan shows no changes before I apply anything
 
 ## Trade-offs And Shortcuts
 
++ There is one NAT gateway instead of one per availability zone. If its zone goes down, the nodes in the other zone lose internet access until it recovers.
++ The EKS API endpoint is public, so `kubectl` works from a laptop. It is open to any IP by default, and `eks_public_access_cidrs` narrows it.
++ The VPC CNI uses the node role instead of its own Pod Identity role. With one app on the cluster this is simpler, and it is the first thing to change as more apps arrive.
 + The pipeline stops at pushing the image. Deploying to the cluster is done manually with `kubectl apply`. I did not want to give the pipeline access to the cluster. I would use GitOps for this instead.
 + There is only one environment. There is no separate dev, staging and production.
 + I did not set a CPU limit on the container, only a CPU request and a memory limit. A CPU limit can slow the app down even when the node has free CPU. If the platform requires one, it is a one line change in the deployment.
