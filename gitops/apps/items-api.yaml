@@ -40,7 +40,7 @@ spec:
           repository: 172316546414.dkr.ecr.eu-west-1.amazonaws.com/items-api
           # The commit SHA tag pushed by CI. Changing this line is a deploy;
           # reverting it is a rollback.
-          tag: "de02e457acdd"
+          tag: "43f784d2912d"
   destination:
     server: https://kubernetes.default.svc
     namespace: items-api
